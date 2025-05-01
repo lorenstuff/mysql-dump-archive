@@ -1,4 +1,8 @@
 # Changelog
+## 3.0.0
+
+* refactor: refactored and cleaned up code and exports
+
 ## 2.0.3
 Fixed a bug where `getTableNames` did not close its connection to the database.
 

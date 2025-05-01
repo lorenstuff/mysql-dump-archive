@@ -1,12 +1,9 @@
 {
-	"extends": "@donutteam/typescript-config",
+	"extends": "@lorenstuff/typescript-config",
 	"compilerOptions":
 	{
 		"rootDir": "./src",
-		"outDir": "./lib",
-
-		// Annoying
-		"verbatimModuleSyntax": false,
+		"outDir": "./build",
 	},
 	"include":
 	[

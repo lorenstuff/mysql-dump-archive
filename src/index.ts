@@ -11,380 +11,20 @@ import archiver from "archiver";
 import mysql2 from "mysql2/promise.js";
 
 //
-// Types
+// Locals
 //
 
-export type ArchiveDirectory =
-{
-	name: string;
-	path: string;
-}
-
-export type DumpStep = 
-	RemovingOldOutputDirectoryDumpStep | 
-	CreatingNewOutputDirectoriesDumpStep |
-	GettingTableNamesDumpStep |
-	DumpingTablesDumpStep |
-	DumpingTableDumpStep |
-	CreatingArchiveDumpStep;
-
-export type RemovingOldOutputDirectoryDumpStep =
-{
-	type: "removingOldOutputDirectory";
-}
-
-export type CreatingNewOutputDirectoriesDumpStep =
-{
-	type: "creatingNewOutputDirectories";
-}
-
-export type GettingTableNamesDumpStep =
-{
-	type: "gettingTableNames";
-}
-
-export type DumpingTablesDumpStep =
-{
-	type: "dumpingTables";
-	tableNames: string[];
-}
-
-export type DumpingTableDumpStep =
-{
-	type: "dumpingTable";
-	tableName: string;
-}
-
-export type CreatingArchiveDumpStep =
-{
-	type: "creatingArchive";
-}
-
-//
-// Utility Functions
-//
-
-export type CreateArchiveOptions =
-{
-	outputDirectory: string;
-	directories: ArchiveDirectory[];
-}
-
-export async function createArchive(options: CreateArchiveOptions) : Promise<string>
-{
-	//
-	// Create Tar
-	//
-
-	const tarFileName = path.join(options.outputDirectory, "dump.tar");
-
-	const tarWriteStream = fs.createWriteStream(tarFileName);
-
-	const tarArchive = archiver("tar");
-
-	tarArchive.pipe(tarWriteStream);
-
-	for (const directory of options.directories)
-	{
-		tarArchive.directory(directory.path, directory.name);
-	}
-
-	await tarArchive.finalize();
-
-	//
-	// Gzip Tar
-	//
-
-	const tarReadStream = fs.createReadStream(tarFileName);
-
-	const gzipFileName = tarFileName + ".gz";
-
-	const gzipWriteSteam = fs.createWriteStream(gzipFileName);
-
-	const gzip = zlib.createGzip();
-
-	return new Promise(
-		(resolve, reject) =>
-		{
-			tarReadStream
-				.pipe(gzip)
-				.pipe(gzipWriteSteam)
-				.on("error",
-					() =>
-					{
-						reject();
-					})
-				.on("finish",
-					() =>
-					{
-						resolve(gzipFileName);
-					});
-		});
-}
-
-export type DumpOptions =
-{
-	mysqlDumpPath: string;
-	outputPath: string;
-
-	databaseUrl: URL;
-	defaultInclusion?: "exclude" | "include";
-	tables?: string[];
-
-	onStep?: (step: DumpStep) => Promise<void>;
-}
-
-export type DumpResult = DumpResultFailure | DumpResultSuccess;
-
-export type DumpResultFailure =
-{
-	success: false;
-	error: Error | null;
-}
-
-export type DumpResultSuccess =
-{
-	success: true;
-	startTimestamp: number;
-	endTimestamp: number;
-	duration: number;
-	tableNames: string[];
-	archiveFilePath: string;
-}
-
-export async function dump(options: DumpOptions) : Promise<DumpResult>
-{
-	const defaultInclusion = options.defaultInclusion ?? "exclude";
-
-	const tables = options.tables ?? [];
-
-	const onStep = options.onStep ?? (async () => {});
-
-	const step = async (step: DumpStep) =>
-	{
-		await onStep(step);
-	}
-
-	try
-	{
-		//
-		// Get Start Date
-		//
-
-		const startDate = new Date();
-
-		//
-		// Remove Old Output Directory
-		//
-
-		await step({ type: "removingOldOutputDirectory" });
-
-		await fs.promises.rm(options.outputPath, { recursive: true, force: true });
-
-		//
-		// Create New Output Directories
-		//
-
-		await step({ type: "creatingNewOutputDirectories" });
-
-		await fs.promises.mkdir(path.join(options.outputPath, "data"), { recursive: true });
-
-		await fs.promises.mkdir(path.join(options.outputPath, "structure"), { recursive: true });
-
-		//
-		// Get Table Names
-		//
-
-		await step({ type: "gettingTableNames" });
-
-		let tableNames = await getTableNames(options.databaseUrl);
-
-		switch (defaultInclusion)
-		{
-			case "exclude":
-			{
-				tableNames = tableNames.filter((tableName) => !tables.includes(tableName));
-
-				break;
-			}
-
-			case "include":
-			{
-				tableNames = tableNames.filter((tableName) => tables.includes(tableName));
-
-				break;
-			}
-		}
-
-		//
-		// Dump Tables
-		//
-
-		await step({ type: "dumpingTables", tableNames });
-
-		for (const tableName of tableNames)
-		{
-			await step({ type: "dumpingTable", tableName });
-
-			await dumpTableStructure(
-				{
-					databaseUrl: options.databaseUrl,
-					outputPath: path.join(options.outputPath, "data", tableName + ".sql"),
-					mysqlDumpPath: options.mysqlDumpPath,
-					tableName,
-				});
-
-			await dumpTableData(
-				{
-					databaseUrl: options.databaseUrl,
-					outputPath: path.join(options.outputPath, "structure", tableName + ".sql"),
-					mysqlDumpPath: options.mysqlDumpPath,
-					tableName,
-				});
-		}
-
-		//
-		// Create .tar.gz Archive
-		//
-
-		await step({ type: "creatingArchive" });
-
-		const archiveFilePath = await createArchive(
-			{
-				outputDirectory: options.outputPath,
-				directories:
-				[
-					{ name: "data", path: path.join(options.outputPath, "data") },
-					{ name: "structure", path: path.join(options.outputPath, "structure") },
-				]
-			});
-		
-		//
-		// Get End Date
-		//
-
-		const endDate = new Date();
-
-		//
-		// Get Timestamps & Duration
-		//
-
-		const startTimestamp = Math.floor(startDate.getTime() / 1000);
-
-		const endTimestamp = Math.floor(endDate.getTime() / 1000);
-
-		const duration = endTimestamp - startTimestamp;
-
-		//
-		// Return
-		//
-
-		return {
-			success: true,
-			startTimestamp,
-			endTimestamp,
-			duration,
-			tableNames,
-			archiveFilePath,
-		};
-	}
-	catch (error)
-	{
-		return {
-			success: false,
-			error: error instanceof Error ? error : null,
-		};
-	}
-}
-
-export type DumpTableDataOptions =
+type GetTableNamesOptions =
 {
 	databaseUrl: URL;
-	outputPath: string;
-	mysqlDumpPath: string;
-	tableName: string;
-}
+	filterTableNames: string[];
+	filterTableNamesMode: "exclude" | "include";
+};
 
-export async function dumpTableData(options: DumpTableDataOptions) : Promise<void>
+async function getTableNames(options: GetTableNamesOptions)
 {
-	const commandComponents =
-		[
-			`"${ options.mysqlDumpPath }"`,
-			`--host ${ options.databaseUrl.hostname }`,
-			`--port ${ options.databaseUrl.port }`,
-			`--user ${ options.databaseUrl.username }`,
-			`--password=${ options.databaseUrl.password }`,
-			`--no-create-info`,
-			`--set-gtid-purged=OFF`,
-			`--single-transaction`,
-			`--no-tablespaces`,
-			options.databaseUrl.pathname.substring(1),
-			options.tableName,
-			`> "${ options.outputPath }"`,
-		];
+	const { databaseUrl, filterTableNames, filterTableNamesMode } = options;
 
-	return new Promise(
-		(resolve, reject) =>
-		{
-			child_process.exec(commandComponents.join(" "),
-				(error) =>
-				{
-					if (error != null)
-					{
-						reject(error);
-					}
-
-					resolve();
-				});
-		});
-
-}
-
-export type DumpTableStructureOptions =
-{
-	databaseUrl: URL;
-	outputPath: string;
-	mysqlDumpPath: string;
-	tableName: string;
-}
-
-export async function dumpTableStructure(options: DumpTableStructureOptions) : Promise<void>
-{
-	const commandComponents =
-		[
-			`"${ options.mysqlDumpPath }"`,
-			`--host ${ options.databaseUrl.hostname }`,
-			`--port ${ options.databaseUrl.port }`,
-			`--user ${ options.databaseUrl.username }`,
-			`--password=${ options.databaseUrl.password }`,
-			`--no-data`,
-			`--set-gtid-purged=OFF`,
-			`--single-transaction`,
-			`--no-tablespaces`,
-			`--skip-add-drop-table`,
-			options.databaseUrl.pathname.substring(1),
-			options.tableName,
-			`> "${ options.outputPath }"`,
-		];
-
-	return new Promise(
-		(resolve, reject) =>
-		{
-			child_process.exec(commandComponents.join(" "),
-				(error) =>
-				{
-					if (error != null)
-					{
-						reject(error);
-					}
-
-					resolve();
-				});
-		});
-}
-
-export async function getTableNames(databaseUrl: URL): Promise<string[]>
-{
 	const connection = await mysql2.createConnection(
 		{
 			uri: databaseUrl.toString(),
@@ -400,7 +40,274 @@ export async function getTableNames(databaseUrl: URL): Promise<string[]>
 
 	connection.end();
 
-	let tableNames = rawTableRows.map(rawTableRow => rawTableRow.TABLE_NAME);
+	const allTableNames = rawTableRows.map(rawTableRow => rawTableRow.TABLE_NAME);
 
-	return tableNames;
+	switch (filterTableNamesMode)
+	{
+		case "exclude":
+			return allTableNames.filter((tableName) => !filterTableNames.includes(tableName));
+
+		case "include":
+			return allTableNames.filter((tableName) => filterTableNames.includes(tableName));
+	}
+}
+
+type DumpTableStructureOptions =
+{
+	mysqlDumpPath: string;
+	databaseUrl: URL;
+	tableName: string;
+	outputPath: string;
+};
+
+async function dumpTableStructure(options: DumpTableStructureOptions)
+{
+	const { mysqlDumpPath, databaseUrl, tableName, outputPath } = options;
+
+	const commandComponents =
+	[
+		`"${ mysqlDumpPath }"`,
+		`--host ${ databaseUrl.hostname }`,
+		`--port ${ databaseUrl.port }`,
+		`--user ${ databaseUrl.username }`,
+		`--password=${ databaseUrl.password }`,
+		`--no-data`,
+		`--set-gtid-purged=OFF`,
+		`--single-transaction`,
+		`--no-tablespaces`,
+		`--skip-add-drop-table`,
+		databaseUrl.pathname.substring(1),
+		tableName,
+		`> "${ outputPath }"`,
+	];
+
+	return new Promise<void>((resolve, reject) => child_process.exec(commandComponents.join(" "),
+		(error) =>
+		{
+			if (error != null)
+			{
+				reject(error);
+			}
+
+			resolve();
+		}));
+}
+
+type DumpTableDataOptions =
+{
+	mysqlDumpPath: string;
+	databaseUrl: URL;
+	tableName: string;
+	outputPath: string;
+};
+
+async function dumpTableData(options: DumpTableDataOptions)
+{
+	const { mysqlDumpPath, databaseUrl, tableName, outputPath } = options;
+
+	const commandComponents =
+	[
+		`"${ mysqlDumpPath }"`,
+		`--host ${ databaseUrl.hostname }`,
+		`--port ${ databaseUrl.port }`,
+		`--user ${ databaseUrl.username }`,
+		`--password=${ databaseUrl.password }`,
+		`--no-create-info`,
+		`--set-gtid-purged=OFF`,
+		`--single-transaction`,
+		`--no-tablespaces`,
+		databaseUrl.pathname.substring(1),
+		tableName,
+		`> "${ outputPath }"`,
+	];
+
+	return new Promise<void>((resolve, reject) => child_process.exec(commandComponents.join(" "),
+		(error) =>
+		{
+			if (error != null)
+			{
+				reject(error);
+			}
+
+			resolve();
+		}));
+}
+
+type CreateArchiveOptions =
+{
+	outputDirectory: string;
+	directories:
+	{
+		name: string;
+		path: string;
+	}[];
+};
+
+async function createArchive(options: CreateArchiveOptions)
+{
+	const { outputDirectory, directories } = options;
+
+	const tarFileName = path.join(outputDirectory, "dump.tar");
+	const tarWriteStream = fs.createWriteStream(tarFileName);
+	const tarArchive = archiver("tar");
+	tarArchive.pipe(tarWriteStream);
+
+	for (const directory of directories)
+	{
+		tarArchive.directory(directory.path, directory.name);
+	}
+
+	await tarArchive.finalize();
+
+	const tarReadStream = fs.createReadStream(tarFileName);
+	const gzip = zlib.createGzip();
+	const gzipFileName = tarFileName + ".gz";
+	const gzipWriteSteam = fs.createWriteStream(gzipFileName);
+
+	return new Promise<string>((resolve, reject) => tarReadStream
+		.pipe(gzip)
+		.pipe(gzipWriteSteam)
+		.on("error", () => reject())
+		.on("finish", () => resolve(gzipFileName)));
+}
+
+//
+// Types
+//
+
+export type DumpStep =
+{
+	type: "removingOldOutputDirectory";
+} |
+{
+	type: "creatingNewOutputDirectories";
+} |
+{
+	type: "gettingTableNames";
+} |
+{
+	type: "dumpingTables";
+	tableNames: string[];
+} |
+{
+	type: "dumpingTable";
+	tableName: string;
+} |
+{
+	type: "creatingArchive";
+};
+
+//
+// Utility Functions
+//
+
+export type DumpAndArchiveMySqlDatabaseOptions =
+{
+	databaseUrl: URL;
+	filterTableNames?: string[];
+	filterTableNamesMode?: "exclude" | "include";
+
+	mysqlDumpPath: string;
+	onStep?: (step: DumpStep) => Promise<void>;
+	outputPath: string;
+};
+
+export type DumpAndArchiveMySqlDatabaseResult =
+{
+	success: false;
+	error: Error | null;
+} |
+{
+	success: true;
+	tableNames: string[];
+	archiveFilePath: string;
+	startTimestamp: number;
+	endTimestamp: number;
+	duration: number;
+};
+
+export async function dumpAndArchiveMySqlDatabase(options: DumpAndArchiveMySqlDatabaseOptions): Promise<DumpAndArchiveMySqlDatabaseResult>
+{
+	const databaseUrl = options.databaseUrl;
+	const filterTableNames = options.filterTableNames ?? [];
+	const filterTableNamesMode = options.filterTableNamesMode ?? "exclude";
+	const mysqlDumpPath = options.mysqlDumpPath;
+	const onStep = options.onStep ?? (async () => {});
+	const outputPath = options.outputPath;
+
+
+	try
+	{
+		const startDate = new Date();
+
+		await onStep({ type: "removingOldOutputDirectory" });
+
+		await fs.promises.rm(outputPath, { recursive: true, force: true });
+
+		await onStep({ type: "creatingNewOutputDirectories" });
+
+		await fs.promises.mkdir(path.join(outputPath, "data"), { recursive: true });
+		await fs.promises.mkdir(path.join(outputPath, "structure"), { recursive: true });
+
+		await onStep({ type: "gettingTableNames" });
+
+		const tableNames = await getTableNames({ databaseUrl, filterTableNames, filterTableNamesMode });
+
+		await onStep({ type: "dumpingTables", tableNames });
+
+		for (const tableName of tableNames)
+		{
+			await onStep({ type: "dumpingTable", tableName });
+
+			await dumpTableStructure(
+				{
+					databaseUrl,
+					outputPath: path.join(outputPath, "data", tableName + ".sql"),
+					mysqlDumpPath,
+					tableName,
+				});
+
+			await dumpTableData(
+				{
+					databaseUrl,
+					outputPath: path.join(outputPath, "structure", tableName + ".sql"),
+					mysqlDumpPath,
+					tableName,
+				});
+		}
+
+		await onStep({ type: "creatingArchive" });
+
+		const archiveFilePath = await createArchive(
+			{
+				outputDirectory: outputPath,
+				directories:
+				[
+					{ name: "data", path: path.join(outputPath, "data") },
+					{ name: "structure", path: path.join(outputPath, "structure") },
+				],
+			});
+
+		const endDate = new Date();
+
+		const startTimestamp = Math.floor(startDate.getTime() / 1000);
+		const endTimestamp = Math.floor(endDate.getTime() / 1000);
+		const duration = endTimestamp - startTimestamp;
+
+		return {
+			success: true,
+			tableNames,
+			archiveFilePath,
+			startTimestamp,
+			endTimestamp,
+			duration,
+		};
+	}
+	catch (error)
+	{
+		return {
+			success: false,
+			error: error instanceof Error ? error : null,
+		};
+	}
 }
