@@ -1,4 +1,8 @@
 # Changelog
+## 3.0.1
+
+* refactor: removed tsconfig.json from .npmignore
+
 ## 3.0.0
 
 * refactor: refactored and cleaned up code and exports
