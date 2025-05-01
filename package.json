@@ -19,6 +19,7 @@
 	},
 	"scripts": {
 		"build": "npx rimraf lib && npx tsc",
-		"build:watch": "npx rimraf lib && npx tsc --watch"
+		"build:watch": "npx rimraf lib && npx tsc --watch",
+		"prepublishOnly": "npm run build"
 	}
 }

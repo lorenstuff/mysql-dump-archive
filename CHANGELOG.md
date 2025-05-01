@@ -1,4 +1,8 @@
 # Changelog
+## 3.0.2
+
+* fix: added prepublishOnly script
+
 ## 3.0.1
 
 * refactor: removed tsconfig.json from .npmignore
